@@ -41,7 +41,7 @@ Following the [Reward Systematic Overhaul Plan](.venv/reward_improvement_todo.md
 
 ---
 
-## 🛠️ Modular Structure
+## Modular Structure
 - `models/`: LocoTransformer and AttnRes architectures.
 - `envs/`: MuJoCo-specific Gym environments and sensor processing.
 - `torchrl/`: RL framework (PPO, Buffer, Collector).
