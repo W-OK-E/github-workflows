@@ -89,9 +89,12 @@ where $H_l = [x_0, x_1, \dots, x_l]$.
 ID & Date & Description & Commit & Metric & Status \\
 \midrule
 E000 & 2026-06-08 & Baseline Understanding & N/A & N/A & \textbf{Complete} \\
+E001 & 2026-06-08 & Baseline Play Test & b8fc464 & N/A & \textbf{Failed (Arch Incompatible)} \\
 \bottomrule
 \end{tabular}
 \caption{Summary of experiments.}
 \end{table}
 
+\section{Analysis of Baseline}
+Attempting to run \texttt{scripts/play.py} on the baseline checkpoint (\texttt{00\_baseline}) resulted in a architecture mismatch. The current code assumes \texttt{LocoAttnResTransformer}, while the checkpoint seems to use a different (likely standard) transformer architecture.
 \end{document}
