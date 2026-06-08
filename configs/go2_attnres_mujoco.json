@@ -5,7 +5,7 @@
     "obs_norm": true,
     "horizon": 1000,
     "env_build": {
-      "scene_path": "/workspace/Quadruped/unitree_mujoco/unitree_robots/go2/scene_terrain.xml",
+      "scene_path": "/home/manas/Research/Quadruped/unitree_mujoco/unitree_robots/go2/scene_terrain.xml",
       "get_image": true,
       "Kp": 40.0,
       "Kd": 0.5,
