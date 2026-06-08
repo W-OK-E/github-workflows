@@ -1,0 +1,97 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amsthm, amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{tcolorbox}
+\usepackage{hyperref}
+
+\title{ResLocoTransformer: Project Understanding Report}
+\author{Gemini CLI Research Agent}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Overview}
+The goal of this project is to implement and train a transformer-based Reinforcement Learning (RL) policy for the Unitree Go2 quadruped robot using the MuJoCo physics engine. The project emphasizes visual-proprioceptive fusion and explores novel transformer architectures like the \texttt{LocoAttnResTransformer}.
+
+\section{Environment: UnitreeMujocoGymEnv}
+The environment is implemented in \texttt{envs/mujoco_env.py}.
+
+\paragraph{Robot and Physics}
+\begin{itemize}
+    \item \textbf{Robot}: Unitree Go2.
+    \item \textbf{Simulator}: MuJoCo 3.x.
+    \item \textbf{Control}: Joint position targets (12-dim), converted to torques via PD control ($K_p=40, K_d=0.5$).
+\end{itemize}
+
+\paragraph{Observations}
+The observation is a concatenated vector of size $84 + 16384 = 16468$.
+\begin{itemize}
+    \item \textbf{State (84-dim)}: Proprioceptive history (length 3).
+    \begin{itemize}
+        \item IMU: [roll, pitch, gyro_x, gyro_y] (4 dims $\times$ 3 steps = 12).
+        \item Joint Angles: 12 joints $\times$ 3 steps = 36.
+        \item Last Actions: 12 joints $\times$ 3 steps = 36.
+    \end{itemize}
+    \item \textbf{Depth (16384-dim)}: 4 stacked $64 \times 64$ depth frames.
+    \begin{itemize}
+        \item Rendered from a body-attached forward-facing camera.
+        \item Log-transformed: $d' = \sqrt{\log(d+1)}$.
+        \item Optionally z-scored.
+    \end{itemize}
+\end{itemize}
+
+\paragraph{Reward Function}
+The primary reward terms include:
+\begin{itemize}
+    \item \textbf{Velocity Tracking}: Exponential reward for matching target forward velocity.
+    \item \textbf{Yaw Rate Tracking}: Exponential reward for matching target angular velocity.
+    \item \textbf{Survival Bonus}: Constant positive reward per step.
+    \item \textbf{Penalties}: Torque, action rate (smoothness), orientation (roll/pitch), height deviation, and lateral velocity/yaw rate.
+\end{itemize}
+
+\section{Model Architecture}
+The architectures are defined in \texttt{models/nets.py} and \texttt{torchrl/networks/}.
+
+\paragraph{LocoTransformerEncoder}
+\begin{itemize}
+    \item \textbf{Visual}: 3-layer CNN (NatureEncoder) $\to$ 16 tokens ($4 \times 4$ grid) of size \texttt{token_dim}.
+    \item \textbf{State}: MLP $\to$ 1 token of size \texttt{token_dim}.
+    \item Tokens are concatenated into a sequence of length 17.
+\end{itemize}
+
+\paragraph{LocoTransformer}
+Standard Transformer layers followed by mean/max pooling of visual tokens and concatenation with the state token.
+
+\paragraph{LocoAttnResTransformer}
+Uses \textbf{Attention Residuals} (\texttt{AttnResLayer}). Standard additive residuals are replaced with depth-wise attention over all preceding layer outputs.
+\[ x_{l+1} = \text{SoftmaxAttention}(q=f(x_l), K=H_l, V=H_l) \]
+where $H_l = [x_0, x_1, \dots, x_l]$.
+
+\section{Training Pipeline}
+\begin{itemize}
+    \item \textbf{Algorithm}: Proximal Policy Optimization (PPO).
+    \item \textbf{Framework}: Custom \texttt{torchrl} library.
+    \item \textbf{Normalization}: \texttt{NormObsWithImg} normalizes the state portion only.
+    \item \textbf{Logging}: Weights and Biases (WandB) and local TensorBoard logs.
+\end{itemize}
+
+\section{Experiment Summary Table}
+\begin{table}[h!]
+\centering
+\setlength{\tabcolsep}{8pt}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lllrrc}
+\toprule
+ID & Date & Description & Commit & Metric & Status \\
+\midrule
+E000 & 2026-06-08 & Baseline Understanding & N/A & N/A & \textbf{Complete} \\
+\bottomrule
+\end{tabular}
+\caption{Summary of experiments.}
+\end{table}
+
+\end{document}

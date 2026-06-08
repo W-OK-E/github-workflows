@@ -1097,6 +1097,8 @@ class AttnResLayer(nn.Module):
     self.k_proj = nn.Linear(dim, dim)
     self.v_proj = nn.Linear(dim, dim)
     self.out_proj = nn.Linear(dim, dim)
+    nn.init.zeros_(self.out_proj.bias)
+    nn.init.xavier_uniform_(self.out_proj.weight, gain=0.01)
 
   def forward(self, query_delta, history):
     """
@@ -1178,8 +1180,9 @@ class LocoAttnResTransformer(nn.Module):
     for n_head, dim_feedforward in transformer_params:
       attn_sub = SelfAttentionSubLayer(dim, n_head)
       ffn_sub = FFNSubLayer(dim, dim_feedforward)
-      res_layer = AttnResLayer(dim, num_heads=attn_res_heads)
-      self.attn_res_layers.append(nn.ModuleList([attn_sub, ffn_sub, res_layer]))
+      res_attn = AttnResLayer(dim, num_heads=attn_res_heads)
+      res_ffn  = AttnResLayer(dim, num_heads=attn_res_heads)
+      self.attn_res_layers.append(nn.ModuleList([attn_sub, ffn_sub, res_attn, res_ffn]))
 
     self.per_modal_tokens = self.encoder.per_modal_tokens
     if self.encoder.in_channels == 4 or self.encoder.in_channels == 12:
@@ -1224,15 +1227,15 @@ class LocoAttnResTransformer(nn.Module):
 
     history = [out]  # x_0 — raw encoder output
 
-    for attn_sublayer, ffn_sublayer, res_layer in self.attn_res_layers:
+    for attn_sublayer, ffn_sublayer, res_attn, res_ffn in self.attn_res_layers:
       # Self-attention sub-layer (pre-norm, no residual added here)
       delta_attn = attn_sublayer(out)
-      out = res_layer(delta_attn, history)
+      out = res_attn(delta_attn, history)
       history.append(out)
 
       # FFN sub-layer (pre-norm, no residual added here)
       delta_ffn = ffn_sublayer(out)
-      out = res_layer(delta_ffn, history)
+      out = res_ffn(delta_ffn, history)
       history.append(out)
 
     # Token aggregation — identical to LocoTransformer

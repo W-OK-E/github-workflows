@@ -30,8 +30,26 @@ import collections
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-import mujoco
 
+try:
+    import mujoco
+except ImportError:
+    # This should not happen if mujoco is installed, but we catch it just in case
+    import mujoco
+except Exception as e:
+    # If it fails during internal imports (e.g. rendering)
+    print(f"Warning: mujoco import failed internally: {e}. Attempting to mock rendering.")
+    import sys
+    from unittest.mock import MagicMock
+    # Mock the failing submodules
+    mock_modules = [
+        "mujoco.egl", "mujoco.osmesa", "mujoco.glfw",
+        "mujoco.rendering", "mujoco.rendering.classic",
+        "mujoco.rendering.classic.renderer"
+    ]
+    for m in mock_modules:
+        sys.modules[m] = MagicMock()
+    import mujoco
 
 from mujoco import viewer
 
@@ -210,20 +228,34 @@ class UnitreeMujocoGymEnv(gym.Env):
         num_action_repeat: int = 10,
         sim_dt: float = 0.001,
         target_vel: float = 0.6,
+        target_angular_vel: float = 0.0,  # rad/s yaw — 0 = walk straight
         alive_reward: float = 0.1,
         fall_reward: float = -10.0,
         max_episode_steps: int = 1000,
         depth_norm: bool = True,
         enable_rendering: bool = False,
-        # --- Phase 2 reward shaping weights ---
+        # --- base tracking weights (always active) ---
         vel_tracking_weight: float = 2.0,
-        vel_sigma: float = 0.25,        # σ² in exp(-||Δv||²/σ²)
+        vel_sigma: float = 0.25,
+        angular_vel_weight: float = 0.5,
+        angular_vel_sigma: float = 0.25,
+        # --- optional penalty weights ---
         torque_weight: float = 0.002,
         action_rate_weight: float = 0.01,
         orientation_weight: float = 0.1,
         height_weight: float = 1.0,
-        target_height: float = 0.28,    # metres — nominal Go2 CoM height
-        lat_yaw_weight: float = 0.1,    # penalise lateral vel + yaw rate
+        target_height: float = 0.28,
+        lat_yaw_weight: float = 0.1,
+        z_vel_weight: float = 0.5,
+        ang_vel_xy_weight: float = 0.05,
+        # --- per-term enable flags (False = computed but not added to total) ---
+        use_torque: bool = False,
+        use_action_rate: bool = False,
+        use_orientation: bool = False,
+        use_height: bool = False,
+        use_lat_yaw: bool = False,
+        use_z_vel: bool = False,
+        use_ang_vel_xy: bool = False,
     ):
         super().__init__()
 
@@ -232,21 +264,35 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.Kd               = Kd
         self.num_action_repeat = num_action_repeat
         self.sim_dt           = sim_dt
-        self.target_vel       = target_vel
-        self.alive_reward     = alive_reward
-        self.fall_reward      = fall_reward
-        self.max_episode_steps = max_episode_steps
-        self.depth_norm       = depth_norm
-        self.enable_rendering = enable_rendering
-        # reward shaping
+        self.target_vel          = target_vel
+        self.target_angular_vel  = target_angular_vel
+        self.alive_reward        = alive_reward
+        self.fall_reward         = fall_reward
+        self.max_episode_steps   = max_episode_steps
+        self.depth_norm          = depth_norm
+        self.enable_rendering    = enable_rendering
+        # base tracking
         self.vel_tracking_weight = vel_tracking_weight
         self.vel_sigma           = vel_sigma
+        self.angular_vel_weight  = angular_vel_weight
+        self.angular_vel_sigma   = angular_vel_sigma
+        # optional penalties
         self.torque_weight       = torque_weight
         self.action_rate_weight  = action_rate_weight
         self.orientation_weight  = orientation_weight
         self.height_weight       = height_weight
         self.target_height       = target_height
         self.lat_yaw_weight      = lat_yaw_weight
+        self.z_vel_weight        = z_vel_weight
+        self.ang_vel_xy_weight   = ang_vel_xy_weight
+        # enable flags
+        self.use_torque          = use_torque
+        self.use_action_rate     = use_action_rate
+        self.use_orientation     = use_orientation
+        self.use_height          = use_height
+        self.use_lat_yaw         = use_lat_yaw
+        self.use_z_vel           = use_z_vel
+        self.use_ang_vel_xy      = use_ang_vel_xy
 
         # ------------------------------------------------------------------
         # Build MuJoCo model with the patched go2.xml (camera + abs meshdir)
@@ -278,26 +324,21 @@ class UnitreeMujocoGymEnv(gym.Env):
             self._depth_renderer = mujoco.Renderer(
                 self.mj_model, height=IMG_H, width=IMG_W
             )
+            self._depth_renderer.enable_depth_rendering()
+            print("Successfully initialized depth renderer.")
         except Exception as e:
-            print(f"Warning: Renderer creation failed with default backend. Error: {e}")
-            print("Attempting to force EGL backend...")
-            os.environ["MUJOCO_GL"] = "egl"
-            self._depth_renderer = mujoco.Renderer(
-                self.mj_model, height=IMG_H, width=IMG_W
-            )
-        self._depth_renderer.enable_depth_rendering()
+            print(f"CRITICAL WARNING: Renderer creation failed. Error: {e}")
+            print("Depth image generation will be disabled (zeros will be returned).")
+            self._depth_renderer = None
 
         # ------------------------------------------------------------------
         # Gym spaces
         #
-        # observation_space reports only the 84-dim STATE part so that
-        # LocoTransformerEncoder receives state_input_dim correctly.
-        # The actual observation returned by step() / reset() is
-        # [state(84) | depth_flat(16384)].
+        # observation_space reports total observation size (state + depth).
         # ------------------------------------------------------------------
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
-            shape=(STATE_DIM,),
+            shape=(STATE_DIM + IMAGE_DIM,),
             dtype=np.float32,
         )
         self.action_space = spaces.Box(
@@ -362,8 +403,13 @@ class UnitreeMujocoGymEnv(gym.Env):
         -------
         np.ndarray, shape (1, 64, 64), dtype float32
         """
-        self._depth_renderer.update_scene(self.mj_data, camera=self._cam_id)
-        raw = self._depth_renderer.render().copy()   # (64, 64), metres
+        if self._depth_renderer is None:
+            # Fallback for headless environments without EGL
+            raw = np.full((IMG_H, IMG_W), DEPTH_FAR, dtype=np.float32)
+        else:
+            self._depth_renderer.update_scene(self.mj_data, camera=self._cam_id)
+            raw = self._depth_renderer.render().copy()   # (64, 64), metres
+
         raw = np.clip(raw, DEPTH_NEAR, DEPTH_FAR)
         processed = np.sqrt(np.log(raw + 1.0)).astype(np.float32)
         return processed[np.newaxis]                 # (1, 64, 64)
@@ -450,58 +496,86 @@ class UnitreeMujocoGymEnv(gym.Env):
         """
         sd = self.mj_data.sensordata
 
-        # --- velocity tracking ---
-        vx  = float(sd[SD_FRAME_VEL][0])
-        dv  = (vx - self.target_vel) ** 2
-        r_vel = self.vel_tracking_weight * math.exp(-dv / self.vel_sigma)
+        # --- base: forward velocity tracking ---
+        vx    = float(sd[SD_FRAME_VEL][0])
+        r_vel = self.vel_tracking_weight * math.exp(
+            -(vx - self.target_vel) ** 2 / self.vel_sigma
+        )
 
-        # --- survival ---
+        # --- base: yaw-rate tracking ---
+        yaw_rate = float(sd[SD_IMU_GYRO][2])
+        r_ang_vel = self.angular_vel_weight * math.exp(
+            -(yaw_rate - self.target_angular_vel) ** 2 / self.angular_vel_sigma
+        )
+
+        # --- base: survival bonus ---
         r_alive = self.alive_reward
 
-        # --- torque penalty ---
-        torques   = self.mj_data.ctrl  # (12,) current control signals
-        r_torque  = -self.torque_weight * float(np.sum(torques ** 2))
+        # --- optional: torque penalty ---
+        torques  = self.mj_data.ctrl
+        r_torque = -self.torque_weight * float(np.sum(torques ** 2))
 
-        # --- action rate penalty (requires ≥2 steps of history) ---
+        # --- optional: action-rate penalty ---
         if len(self._action_hist) >= 2:
-            a_prev     = self._action_hist[-2]
-            a_curr     = self._action_hist[-1]
             r_action_rate = -self.action_rate_weight * float(
-                np.sum((a_curr - a_prev) ** 2)
+                np.sum((self._action_hist[-1] - self._action_hist[-2]) ** 2)
             )
         else:
             r_action_rate = 0.0
 
-        # --- orientation penalty ---
-        quat         = sd[SD_IMU_QUAT]
+        # --- optional: orientation penalty ---
+        quat          = sd[SD_IMU_QUAT]
         roll, pitch, _ = _quat_wxyz_to_rpy(quat)
-        r_orientation = -self.orientation_weight * (roll ** 2 + pitch ** 2)
+        r_orientation  = -self.orientation_weight * (roll ** 2 + pitch ** 2)
 
-        # --- body height penalty ---
-        z         = float(self.mj_data.xpos[self._base_body_id, 2])
-        r_height  = -self.height_weight * (z - self.target_height) ** 2
+        # --- optional: body height penalty ---
+        z        = float(self.mj_data.xpos[self._base_body_id, 2])
+        r_height = -self.height_weight * (z - self.target_height) ** 2
 
-        # --- lateral velocity + yaw rate penalty ---
-        vy       = float(sd[SD_FRAME_VEL][1])
-        yaw_rate = float(sd[SD_IMU_GYRO][2])
+        # --- optional: lateral velocity + yaw-rate penalty ---
+        vy        = float(sd[SD_FRAME_VEL][1])
         r_lat_yaw = -self.lat_yaw_weight * (vy ** 2 + yaw_rate ** 2)
 
-        total = (r_vel + r_alive + r_torque + r_action_rate
-                 + r_orientation + r_height + r_lat_yaw)
+        # --- optional: vertical velocity penalty ---
+        vz      = float(sd[SD_FRAME_VEL][2])
+        r_z_vel = -self.z_vel_weight * (vz ** 2)
+
+        # --- optional: roll/pitch angular velocity penalty ---
+        wx           = float(sd[SD_IMU_GYRO][0])
+        wy           = float(sd[SD_IMU_GYRO][1])
+        r_ang_vel_xy = -self.ang_vel_xy_weight * (wx ** 2 + wy ** 2)
+
+        # Base terms always active. Optional terms gated by flags.
+        # All terms are computed and logged regardless so we can monitor
+        # what a disabled term would have contributed before enabling it.
+        total = r_vel + r_ang_vel + r_alive
+        if self.use_torque:      total += r_torque
+        if self.use_action_rate: total += r_action_rate
+        if self.use_orientation: total += r_orientation
+        if self.use_height:      total += r_height
+        if self.use_lat_yaw:     total += r_lat_yaw
+        if self.use_z_vel:       total += r_z_vel
+        if self.use_ang_vel_xy:  total += r_ang_vel_xy
 
         terms = {
             "reward/forward_vel":   r_vel,
+            "reward/ang_vel":       r_ang_vel,
             "reward/alive":         r_alive,
             "reward/torque":        r_torque,
             "reward/action_rate":   r_action_rate,
             "reward/orientation":   r_orientation,
             "reward/height":        r_height,
             "reward/lat_yaw":       r_lat_yaw,
+            "reward/z_vel":         r_z_vel,
+            "reward/ang_vel_xy":    r_ang_vel_xy,
             "reward/total":         total,
             "diag/vx":              vx,
+            "diag/yaw_rate":        yaw_rate,
             "diag/base_height":     z,
             "diag/roll":            roll,
             "diag/pitch":           pitch,
+            "diag/vy":              vy,
+            "diag/vz":              vz,
         }
         return total, terms
 
@@ -558,20 +632,25 @@ class UnitreeMujocoGymEnv(gym.Env):
         if self._viewer is not None:
             self._viewer.sync()
 
-        info = {"fallen": fallen, "timeout": timeout, **reward_terms}
+        info = {"fallen": fallen, "timeout": timeout, "time_limit": timeout, **reward_terms}
         terminated = fallen
         truncated  = timeout
         return self._build_observation(), reward, terminated, truncated, info
 
     def render(self, mode="rgb_array"):
         """Render a 480×640 third-person RGB view (for recording / debugging)."""
-        renderer = mujoco.Renderer(self.mj_model, height=480, width=640)
-        renderer.update_scene(self.mj_data)
-        img = renderer.render().copy()
-        renderer.close()
-        return img
+        try:
+            renderer = mujoco.Renderer(self.mj_model, height=480, width=640)
+            renderer.update_scene(self.mj_data)
+            img = renderer.render().copy()
+            renderer.close()
+            return img
+        except Exception as e:
+            print(f"Warning: render() failed: {e}")
+            return np.zeros((480, 640, 3), dtype=np.uint8)
 
     def close(self):
-        self._depth_renderer.close()
-        if self._viewer is not None:
+        if self._depth_renderer is not None:
+            self._depth_renderer.close()
+        if hasattr(self, "_viewer") and self._viewer is not None:
             self._viewer.close()

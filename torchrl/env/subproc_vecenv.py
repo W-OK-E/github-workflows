@@ -8,6 +8,7 @@ mp.set_start_method('spawn', force=True)
 
 
 def env_worker(env_funcs, env_args, child_pipe, parent_pipe):
+  import patch_mujoco
   envs = [
     env_func(*env_arg)
     for env_func, env_arg in zip(env_funcs, env_args)
@@ -30,6 +31,7 @@ def env_worker(env_funcs, env_args, child_pipe, parent_pipe):
       elif command == 'reset':
         # gymnasium reset() returns (obs, info) — extract obs only
         results = [env.reset(**data)[0] for env in envs]
+        # print(f"DEBUG: Worker reset returned {len(results)} obs, first shape {results[0].shape if results else 'N/A'}")
         child_pipe.send(results)
 
       elif command == 'partial_reset':
@@ -106,7 +108,14 @@ class SubProcVecEnv(VecEnv):
 
     obs = []
     for parent_pipe in self.parent_pipes:
-      obs += parent_pipe.recv()   # each element is a plain obs array
+      worker_obs = parent_pipe.recv()
+      # print(f"DEBUG: Parent received {len(worker_obs)} obs from worker")
+      obs += worker_obs   # each element is a plain obs array
+
+    if not obs:
+      print("CRITICAL ERROR: SubProcVecEnv.reset() received NO observations from workers!")
+    else:
+      print(f"DEBUG: SubProcVecEnv.reset() stacked obs shape {np.stack(obs).shape}")
 
     self._obs = np.stack(obs)
     return self._obs, {}          # (obs, info) for gymnasium wrapper compatibility

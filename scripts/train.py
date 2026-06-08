@@ -8,6 +8,11 @@ Usage:
 """
 
 import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import patch_mujoco
+import copy
 import glob
 import re
 import time
@@ -132,6 +137,9 @@ def experiment(args):
         state_input_dim=env.observation_space.shape[0],
         **params["encoder"],
     )
+    # Independent copy so actor and critic have separate encoder parameters
+    # and each optimizer only updates its own weights (no double-update).
+    encoder_vf = copy.deepcopy(encoder)
 
     # Select LocoAttnResTransformer when 'attn_res_heads' is configured;
     # otherwise fall back to the standard LocoTransformer.
@@ -147,7 +155,7 @@ def experiment(args):
             **params["policy"],
         )
         vf = networks.LocoAttnResTransformer(
-            encoder=encoder,
+            encoder=encoder_vf,
             state_input_shape=env.observation_space.shape[0],
             visual_input_shape=(4, 64, 64),
             output_shape=1,

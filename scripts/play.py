@@ -90,6 +90,8 @@ def _resolve_pf_path(args, params):
         args.log_dir, experiment_name, params["env_name"], str(args.seed), "model"
     )
     pf_path = osp.join(model_dir, f"model_pf_{args.checkpoint}.pth")
+    pf_path = "/home/manas/Research/ResLocoTransformer/log/go2_attnres_mujoco/UnitreeMujocoGymEnv/0/model/model_pf_best.pth"
+    model_dir = "/home/manas/Research/ResLocoTransformer/log/go2_attnres_mujoco/UnitreeMujocoGymEnv/0/model"
     return pf_path, model_dir
 
 

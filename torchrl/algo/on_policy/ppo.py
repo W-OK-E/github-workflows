@@ -27,9 +27,9 @@ class PPO(A2C):
 
   def update_per_epoch(self):
     self.process_epoch_samples()
-    atu.update_linear_schedule(
+    atu.update_cosine_schedule(
       self.pf_optimizer, self.current_epoch, self.num_epochs, self.plr)
-    atu.update_linear_schedule(
+    atu.update_cosine_schedule(
       self.vf_optimizer, self.current_epoch, self.num_epochs, self.vlr)
     atu.copy_model_params_from_to(self.pf, self.target_pf)
     for _ in range(self.opt_epochs):

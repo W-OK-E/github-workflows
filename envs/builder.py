@@ -57,8 +57,8 @@ class NormObsWithImg(gym.ObservationWrapper, BaseWrapper):
     def __init__(self, env, epsilon=1e-4, clipob=10.0):
         super().__init__(env)
         self.clipob = clipob
-        self._obs_normalizer = Normalizer(env.observation_space.shape)
-        self.state_shape = int(np.prod(env.observation_space.shape))
+        self.state_shape = 84
+        self._obs_normalizer = Normalizer((self.state_shape,))
 
     def observation(self, observation):
         if self.training:

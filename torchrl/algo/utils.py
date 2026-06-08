@@ -1,3 +1,4 @@
+import math
 import torch
 import numpy as np
 
@@ -28,5 +29,13 @@ def copy_model_params_from_to(source, target):
 def update_linear_schedule(optimizer, epoch, total_num_epochs, initial_lr):
   """Decreases the learning rate linearly"""
   lr = initial_lr - (initial_lr * (epoch / float(total_num_epochs)))
+  for param_group in optimizer.param_groups:
+    param_group['lr'] = lr
+
+
+def update_cosine_schedule(optimizer, epoch, total_num_epochs, initial_lr, min_lr=1e-6):
+  """Cosine annealing decay: starts at initial_lr, ends at min_lr (never zero)."""
+  progress = epoch / float(total_num_epochs)
+  lr = min_lr + 0.5 * (initial_lr - min_lr) * (1.0 + math.cos(math.pi * progress))
   for param_group in optimizer.param_groups:
     param_group['lr'] = lr
