@@ -79,8 +79,8 @@ def print_table(results):
     print(fmt.format("Experiment", "Final", "Peak", "Status"))
     print("-" * 72)
 
-    baseline_peak = next((p for _, _, p, ok in results if ok and p is not None
-                          and "baseline" in _), None)
+    baseline_peak = next((peak for eid, _, peak, ok in results if ok and peak is not None
+                          and "baseline" in eid), None)
     for exp_id, final, peak, ok in results:
         fs = f"{final:.4f}" if final is not None else "n/a"
         ps = f"{peak:.4f}"  if peak  is not None else "n/a"

@@ -8,7 +8,9 @@ mp.set_start_method('spawn', force=True)
 
 
 def env_worker(env_funcs, env_args, child_pipe, parent_pipe):
-  import patch_mujoco
+  import os
+  if "MUJOCO_GL" not in os.environ:
+      os.environ["MUJOCO_GL"] = "egl"
   envs = [
     env_func(*env_arg)
     for env_func, env_arg in zip(env_funcs, env_args)

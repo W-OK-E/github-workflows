@@ -40,6 +40,19 @@ def get_args():
                       help='checkpoint epoch to resume from (e.g. 1000); '
                            'defaults to the latest numeric checkpoint')
 
+  parser.add_argument('--freeze_backbone', action='store_true', default=False,
+                      help='freeze transformer/state MLP, only train CNN encoder + policy head')
+
+  parser.add_argument('--residual_policy', action='store_true', default=False,
+                      help='wrap loaded policy with a trainable residual MLP (base fully frozen)')
+
+  parser.add_argument('--load_from', type=str, default=None,
+                      help='load weights from a different experiment directory '
+                           '(e.g. log_gait/gait_v8_mlp_flat/UnitreeMujocoGymEnv/0/model)')
+
+  parser.add_argument('--load_epoch', type=str, default=None,
+                      help='epoch to load from --load_from dir (default: best)')
+
   parser.add_argument("--device", type=int, default=0,
                       help="gpu secification",)
 

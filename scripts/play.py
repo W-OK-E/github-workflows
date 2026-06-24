@@ -87,11 +87,9 @@ def _resolve_pf_path(args, params):
         else args.id
     )
     model_dir = osp.join(
-        args.log_dir, experiment_name, params["env_name"], str(args.seed), "model"
+        args.log_dir, "model"
     )
     pf_path = osp.join(model_dir, f"model_pf_{args.checkpoint}.pth")
-    pf_path = "/home/manas/Research/ResLocoTransformer/log/go2_attnres_mujoco/UnitreeMujocoGymEnv/0/model/model_pf_best.pth"
-    model_dir = "/home/manas/Research/ResLocoTransformer/log/go2_attnres_mujoco/UnitreeMujocoGymEnv/0/model"
     return pf_path, model_dir
 
 
@@ -163,7 +161,7 @@ def play(args):
 
     encoder = networks.LocoTransformerEncoder(
         in_channels=4,
-        state_input_dim=env.observation_space.shape[0],
+        state_input_dim=env.unwrapped.state_dim,
         **params["encoder"],
     )
 
@@ -172,7 +170,7 @@ def play(args):
     if _use_attn_res:
         pf = policies.GaussianContPolicyLocoAttnResTransformer(
             encoder=encoder,
-            state_input_shape=env.observation_space.shape[0],
+            state_input_shape=env.unwrapped.state_dim,
             visual_input_shape=(4, 64, 64),
             output_shape=env.action_space.shape[0],
             **params["net"],
@@ -181,7 +179,7 @@ def play(args):
     else:
         pf = policies.GaussianContPolicyLocoTransformer(
             encoder=encoder,
-            state_input_shape=env.observation_space.shape[0],
+            state_input_shape=env.unwrapped.state_dim,
             visual_input_shape=(4, 64, 64),
             output_shape=env.action_space.shape[0],
             **params["net"],

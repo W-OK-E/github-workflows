@@ -11,7 +11,7 @@ import os
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import patch_mujoco
+os.environ.setdefault("MUJOCO_GL", "egl")
 import copy
 import glob
 import re
@@ -24,7 +24,7 @@ import random
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from envs.builder import get_subprocvec_env
+from envs.builder import get_subprocvec_env, get_vec_env
 import torch
 import gymnasium as gym
 
@@ -58,17 +58,15 @@ def experiment(args):
         "cuda:{}".format(args.device) if args.cuda else "cpu"
     )
 
-    env = get_subprocvec_env(
+    env = get_vec_env(
         params["env_name"],
         params["env"],
         args.vec_env_nums,
-        args.proc_nums,
     )
-    eval_env = get_subprocvec_env(
+    eval_env = get_vec_env(
         params["env_name"],
         params["env"],
-        max(2, args.vec_env_nums),
-        max(2, args.proc_nums),
+        max(1, args.vec_env_nums),
     )
 
     if hasattr(env, "_obs_normalizer"):
@@ -132,51 +130,64 @@ def experiment(args):
 
     params["net"]["base_type"] = networks.MLPBase
 
-    encoder = networks.LocoTransformerEncoder(
-        in_channels=4,             #!NOTE - Remember depth image is being passed.
-        state_input_dim=env.observation_space.shape[0],
-        **params["encoder"],
-    )
-    # Independent copy so actor and critic have separate encoder parameters
-    # and each optimizer only updates its own weights (no double-update).
-    encoder_vf = copy.deepcopy(encoder)
+    _use_mlp = params.get("policy_type", "") == "mlp"
 
-    # Select LocoAttnResTransformer when 'attn_res_heads' is configured;
-    # otherwise fall back to the standard LocoTransformer.
-    _use_attn_res = "attn_res_heads" in params.get("net", {})
-
-    if _use_attn_res:
-        pf = policies.GaussianContPolicyLocoAttnResTransformer(
-            encoder=encoder,
-            state_input_shape=env.observation_space.shape[0],
-            visual_input_shape=(4, 64, 64),
+    if _use_mlp:
+        # Simple MLP policy — no encoder, no transformer, state-only
+        obs_dim = env.unwrapped.observation_space.shape[0]
+        pf = policies.GaussianContPolicyBasicBias(
+            input_shape=obs_dim,
             output_shape=env.action_space.shape[0],
             **params["net"],
             **params["policy"],
         )
-        vf = networks.LocoAttnResTransformer(
-            encoder=encoder_vf,
-            state_input_shape=env.observation_space.shape[0],
-            visual_input_shape=(4, 64, 64),
+        vf = networks.Net(
+            input_shape=obs_dim,
             output_shape=1,
             **params["net"],
         )
     else:
-        pf = policies.GaussianContPolicyLocoTransformer(
-            encoder=encoder,
-            state_input_shape=env.observation_space.shape[0],
-            visual_input_shape=(4, 64, 64),
-            output_shape=env.action_space.shape[0],
-            **params["net"],
-            **params["policy"],
+        encoder = networks.LocoTransformerEncoder(
+            in_channels=4,
+            state_input_dim=env.unwrapped.state_dim,
+            **params["encoder"],
         )
-        vf = networks.LocoTransformer(
-            encoder=encoder,
-            state_input_shape=env.observation_space.shape[0],
-            visual_input_shape=(4, 64, 64),
-            output_shape=1,
-            **params["net"],
-        )
+        encoder_vf = copy.deepcopy(encoder)
+
+        _use_attn_res = "attn_res_heads" in params.get("net", {})
+
+        if _use_attn_res:
+            pf = policies.GaussianContPolicyLocoAttnResTransformer(
+                encoder=encoder,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=env.action_space.shape[0],
+                **params["net"],
+                **params["policy"],
+            )
+            vf = networks.LocoAttnResTransformer(
+                encoder=encoder_vf,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=1,
+                **params["net"],
+            )
+        else:
+            pf = policies.GaussianContPolicyLocoTransformer(
+                encoder=encoder,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=env.action_space.shape[0],
+                **params["net"],
+                **params["policy"],
+            )
+            vf = networks.LocoTransformer(
+                encoder=encoder,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=1,
+                **params["net"],
+            )
 
     print(pf)
     print(vf)
@@ -212,6 +223,48 @@ def experiment(args):
             env._obs_normalizer = loaded_norm
             eval_env._obs_normalizer = loaded_norm
             print(f"Loaded obs normalizer from {norm_path}")
+
+    elif args.load_from is not None:
+        load_dir = args.load_from
+        tag = args.load_epoch if args.load_epoch else "best"
+        pf_path = osp.join(load_dir, f"model_pf_{tag}.pth")
+        vf_path = osp.join(load_dir, f"model_vf_{tag}.pth")
+        norm_path = osp.join(load_dir, f"_obs_normalizer_{tag}.pkl")
+
+        pf.load_state_dict(torch.load(pf_path, map_location=device))
+        vf.load_state_dict(torch.load(vf_path, map_location=device))
+        print(f"Loaded pretrained pf from {pf_path}")
+        print(f"Loaded pretrained vf from {vf_path}")
+
+        if osp.exists(norm_path) and hasattr(env, "_obs_normalizer"):
+            with open(norm_path, "rb") as f:
+                loaded_norm = pickle.load(f)
+            env._obs_normalizer = loaded_norm
+            eval_env._obs_normalizer = loaded_norm
+            print(f"Loaded obs normalizer from {norm_path}")
+
+    if args.freeze_backbone:
+        frozen = []
+        for name, param in pf.named_parameters():
+            if name.startswith(("encoder.base.", "encoder.state_projector.",
+                                "token_ln.", "attn_res_layers.")):
+                param.requires_grad = False
+                frozen.append(name)
+        print(f"Froze {len(frozen)} policy params (transformer + state MLP)")
+        trainable = sum(p.numel() for p in pf.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in pf.parameters())
+        print(f"Trainable: {trainable}/{total} ({100*trainable/total:.1f}%)")
+
+    if args.residual_policy:
+        state_dim = env.unwrapped.state_dim
+        action_dim = env.action_space.shape[0]
+        pf = policies.ResidualPolicy(
+            base_policy=pf, state_dim=state_dim, action_dim=action_dim,
+        ).to(device)
+        base_params = sum(p.numel() for p in pf.base_policy.parameters())
+        res_params = sum(p.numel() for p in pf.residual_mlp.parameters())
+        print(f"Residual policy: base={base_params} (frozen), "
+              f"residual={res_params} (trainable), logstd=1")
 
     agent = PPO(
         pf=pf,

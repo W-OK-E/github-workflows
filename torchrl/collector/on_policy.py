@@ -98,6 +98,8 @@ class VecOnPolicyCollector(VecCollector):
     out = self.pf.explore(ob_tensor)
     acts = out["action"]
     acts = acts.detach().cpu().numpy()
+    if acts.ndim == 1:
+      acts = acts[np.newaxis, :]
 
     values = self.vf(ob_tensor)
     values = values.detach().cpu().numpy()

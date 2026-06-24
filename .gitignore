@@ -1,5 +1,30 @@
 tips_attn_res.md
-log/
+log*/
 train_process*
 resloco_transformer.egg-info/
 .venv/
+*__pycache__/
+*.pyc
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

@@ -223,6 +223,7 @@ class UnitreeMujocoGymEnv(gym.Env):
     def __init__(
         self,
         scene_path: str,
+        get_image: bool = True,
         Kp: float = 40.0,
         Kd: float = 0.5,
         num_action_repeat: int = 10,
@@ -248,6 +249,15 @@ class UnitreeMujocoGymEnv(gym.Env):
         lat_yaw_weight: float = 0.1,
         z_vel_weight: float = 0.5,
         ang_vel_xy_weight: float = 0.05,
+        # --- feet air time reward ---
+        feet_air_time_weight: float = 0.0,
+        feet_air_time_target: float = 0.5,
+        # --- gait quality rewards ---
+        foot_slip_weight: float = 0.0,
+        foot_clearance_weight: float = 0.0,
+        foot_clearance_target: float = 0.04,
+        pitch_rate_weight: float = 0.0,
+        flat_orientation_weight: float = 0.0,
         # --- per-term enable flags (False = computed but not added to total) ---
         use_torque: bool = False,
         use_action_rate: bool = False,
@@ -256,10 +266,16 @@ class UnitreeMujocoGymEnv(gym.Env):
         use_lat_yaw: bool = False,
         use_z_vel: bool = False,
         use_ang_vel_xy: bool = False,
+        use_feet_air_time: bool = False,
+        use_foot_slip: bool = False,
+        use_foot_clearance: bool = False,
+        use_pitch_rate: bool = False,
+        use_flat_orientation: bool = False,
     ):
         super().__init__()
 
         self.scene_path       = scene_path
+        self.get_image        = get_image
         self.Kp               = Kp
         self.Kd               = Kd
         self.num_action_repeat = num_action_repeat
@@ -285,6 +301,13 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.lat_yaw_weight      = lat_yaw_weight
         self.z_vel_weight        = z_vel_weight
         self.ang_vel_xy_weight   = ang_vel_xy_weight
+        self.feet_air_time_weight  = feet_air_time_weight
+        self.feet_air_time_target  = feet_air_time_target
+        self.foot_slip_weight      = foot_slip_weight
+        self.foot_clearance_weight = foot_clearance_weight
+        self.foot_clearance_target = foot_clearance_target
+        self.pitch_rate_weight     = pitch_rate_weight
+        self.flat_orientation_weight = flat_orientation_weight
         # enable flags
         self.use_torque          = use_torque
         self.use_action_rate     = use_action_rate
@@ -293,6 +316,11 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.use_lat_yaw         = use_lat_yaw
         self.use_z_vel           = use_z_vel
         self.use_ang_vel_xy      = use_ang_vel_xy
+        self.use_feet_air_time   = use_feet_air_time
+        self.use_foot_slip       = use_foot_slip
+        self.use_foot_clearance  = use_foot_clearance
+        self.use_pitch_rate      = use_pitch_rate
+        self.use_flat_orientation = use_flat_orientation
 
         # ------------------------------------------------------------------
         # Build MuJoCo model with the patched go2.xml (camera + abs meshdir)
@@ -313,32 +341,43 @@ class UnitreeMujocoGymEnv(gym.Env):
         self._base_body_id = mujoco.mj_name2id(
             self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "base_link"
         )
+        self._foot_geom_ids = [
+            mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, n)
+            for n in ["FL", "FR", "RL", "RR"]
+        ]
+        self._floor_geom_id = mujoco.mj_name2id(
+            self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor"
+        )
+        self._foot_body_ids = [
+            mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, n)
+            for n in ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+        ]
+        self._feet_air_time = np.zeros(4, dtype=np.float64)
+        self._feet_contact_last = np.zeros(4, dtype=bool)
 
         # ------------------------------------------------------------------
         # Offscreen depth renderer (64 × 64, body-attached camera)
         # ------------------------------------------------------------------
-        if "MUJOCO_GL" not in os.environ:
-            os.environ["MUJOCO_GL"] = "egl"
-
-        try:
-            self._depth_renderer = mujoco.Renderer(
-                self.mj_model, height=IMG_H, width=IMG_W
-            )
-            self._depth_renderer.enable_depth_rendering()
-            print("Successfully initialized depth renderer.")
-        except Exception as e:
-            print(f"CRITICAL WARNING: Renderer creation failed. Error: {e}")
-            print("Depth image generation will be disabled (zeros will be returned).")
-            self._depth_renderer = None
+        self._depth_renderer = None
+        if self.get_image:
+            if "MUJOCO_GL" not in os.environ:
+                os.environ["MUJOCO_GL"] = "egl"
+            try:
+                self._depth_renderer = mujoco.Renderer(
+                    self.mj_model, height=IMG_H, width=IMG_W
+                )
+                self._depth_renderer.enable_depth_rendering()
+            except Exception as e:
+                print(f"WARNING: Renderer creation failed: {e}")
+                self._depth_renderer = None
 
         # ------------------------------------------------------------------
         # Gym spaces
-        #
-        # observation_space reports total observation size (state + depth).
         # ------------------------------------------------------------------
+        obs_dim = STATE_DIM + IMAGE_DIM if self.get_image else STATE_DIM
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
-            shape=(STATE_DIM + IMAGE_DIM,),
+            shape=(obs_dim,),
             dtype=np.float32,
         )
         self.action_space = spaces.Box(
@@ -375,6 +414,11 @@ class UnitreeMujocoGymEnv(gym.Env):
     def image_channels(self) -> int:
         """Number of depth image channels (stacked frames = 4)."""
         return NUM_DEPTH_FRAMES
+
+    @property
+    def state_dim(self) -> int:
+        """Dimension of the proprioceptive state vector (84)."""
+        return STATE_DIM
 
     # ------------------------------------------------------------------
     # Internal observation helpers
@@ -428,25 +472,28 @@ class UnitreeMujocoGymEnv(gym.Env):
             self._joint_hist.append(joint0.copy())
             self._action_hist.append(act0.copy())
 
-        depth0 = self._get_depth_frame()
-        self._depth_buf.clear()
-        for _ in range(NUM_DEPTH_FRAMES):
-            self._depth_buf.append(depth0.copy())
+        if self.get_image:
+            depth0 = self._get_depth_frame()
+            self._depth_buf.clear()
+            for _ in range(NUM_DEPTH_FRAMES):
+                self._depth_buf.append(depth0.copy())
 
     def _build_observation(self) -> np.ndarray:
         """
-        Concatenate history buffers into the flat observation vector:
-          [imu_3hist(12) | joint_3hist(36) | action_3hist(36) | depth_flat(16384)]
+        Concatenate history buffers into the flat observation vector.
+        With get_image=True:  [state(84) | depth_flat(16384)]
+        With get_image=False: [state(84)]
         """
-        # State part (84-dim)
-        imu_hist   = np.concatenate(list(self._imu_hist),    axis=0)   # (12,)
-        joint_hist = np.concatenate(list(self._joint_hist),  axis=0)   # (36,)
-        act_hist   = np.concatenate(list(self._action_hist), axis=0)   # (36,)
-        state = np.concatenate([imu_hist, joint_hist, act_hist])        # (84,)
+        imu_hist   = np.concatenate(list(self._imu_hist),    axis=0)
+        joint_hist = np.concatenate(list(self._joint_hist),  axis=0)
+        act_hist   = np.concatenate(list(self._action_hist), axis=0)
+        state = np.concatenate([imu_hist, joint_hist, act_hist])
 
-        # Depth part (16384-dim)
-        depth_stack = np.concatenate(list(self._depth_buf), axis=0)    # (4, 64, 64)
-        depth_flat  = depth_stack.reshape(-1).astype(np.float32)       # (16384,)
+        if not self.get_image:
+            return state.astype(np.float32)
+
+        depth_stack = np.concatenate(list(self._depth_buf), axis=0)
+        depth_flat  = depth_stack.reshape(-1).astype(np.float32)
         if self.depth_norm:
             depth_flat = (depth_flat - DEPTH_MEAN) / DEPTH_STD
 
@@ -476,8 +523,32 @@ class UnitreeMujocoGymEnv(gym.Env):
             mujoco.mj_step(self.mj_model, self.mj_data)
 
     def _is_fallen(self) -> bool:
-        """True when the base body's CoM drops below 0.20 m."""
-        return float(self.mj_data.xpos[self._base_body_id, 2]) < 0.20
+        """True when the base body's CoM drops below 0.15 m (only for truly collapsed)."""
+        return float(self.mj_data.xpos[self._base_body_id, 2]) < 0.15
+
+    def _get_foot_contacts(self) -> np.ndarray:
+        """Return bool array [FL, FR, RL, RR] — True if foot touches floor."""
+        contacts = np.zeros(4, dtype=bool)
+        for i in range(self.mj_data.ncon):
+            c = self.mj_data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            for fi, fg in enumerate(self._foot_geom_ids):
+                if (g1 == fg and g2 == self._floor_geom_id) or \
+                   (g2 == fg and g1 == self._floor_geom_id):
+                    contacts[fi] = True
+        return contacts
+
+    def _compute_feet_air_time_reward(self, contacts: np.ndarray) -> float:
+        """Reward each foot for spending ~target seconds in the air per stride."""
+        dt = self.sim_dt * self.num_action_repeat
+        self._feet_air_time += dt
+        first_contact = contacts & ~self._feet_contact_last
+        reward = float(np.sum(
+            (self._feet_air_time - self.feet_air_time_target) * first_contact
+        ))
+        self._feet_air_time[contacts] = 0.0
+        self._feet_contact_last = contacts.copy()
+        return reward
 
     def _compute_reward(self):
         """
@@ -497,10 +568,15 @@ class UnitreeMujocoGymEnv(gym.Env):
         sd = self.mj_data.sensordata
 
         # --- base: forward velocity tracking ---
+        # Exponential tracking (baselined so vx=0 → 0) plus linear bonus
+        # to provide gradient toward forward movement even far from target.
         vx    = float(sd[SD_FRAME_VEL][0])
-        r_vel = self.vel_tracking_weight * math.exp(
-            -(vx - self.target_vel) ** 2 / self.vel_sigma
+        baseline_vel = math.exp(
+            -self.target_vel ** 2 / self.vel_sigma
         )
+        r_vel = self.vel_tracking_weight * (math.exp(
+            -(vx - self.target_vel) ** 2 / self.vel_sigma
+        ) - baseline_vel) + min(vx, self.target_vel) * 3.0
 
         # --- base: yaw-rate tracking ---
         yaw_rate = float(sd[SD_IMU_GYRO][2])
@@ -545,10 +621,49 @@ class UnitreeMujocoGymEnv(gym.Env):
         wy           = float(sd[SD_IMU_GYRO][1])
         r_ang_vel_xy = -self.ang_vel_xy_weight * (wx ** 2 + wy ** 2)
 
+        # --- optional: feet air time reward ---
+        contacts = self._get_foot_contacts()
+        r_feet_air_time = self.feet_air_time_weight * self._compute_feet_air_time_reward(contacts)
+        n_foot_contacts = int(np.sum(contacts))
+
+        # --- optional: foot slip penalty (tangential velocity during contact) ---
+        r_foot_slip = 0.0
+        if self.use_foot_slip:
+            vel6 = np.zeros(6)
+            for fi in range(4):
+                if contacts[fi]:
+                    mujoco.mj_objectVelocity(
+                        self.mj_model, self.mj_data,
+                        mujoco.mjtObj.mjOBJ_BODY, self._foot_body_ids[fi],
+                        vel6, 0,
+                    )
+                    r_foot_slip -= self.foot_slip_weight * (vel6[3] ** 2 + vel6[4] ** 2)
+
+        # --- optional: foot clearance reward (height during swing) ---
+        r_foot_clearance = 0.0
+        if self.use_foot_clearance:
+            for fi in range(4):
+                if not contacts[fi]:
+                    foot_z = float(self.mj_data.xpos[self._foot_body_ids[fi], 2])
+                    r_foot_clearance += self.foot_clearance_weight * min(
+                        foot_z, self.foot_clearance_target
+                    )
+
+        # --- optional: pitch rate penalty (high pitch rate → falling) ---
+        r_pitch_rate = -self.pitch_rate_weight * (wy ** 2) if self.use_pitch_rate else 0.0
+
+        # --- optional: flat orientation reward (bonus for staying level) ---
+        r_flat_orientation = 0.0
+        if self.use_flat_orientation:
+            r_flat_orientation = self.flat_orientation_weight * math.exp(
+                -6.0 * (roll ** 2 + pitch ** 2)
+            )
+
+        # --- standstill penalty: smooth ramp, zero at target_vel ---
+        r_standstill = -0.5 * np.clip(1.0 - vx / self.target_vel, 0.0, 1.0) if self.target_vel > 0.0 else 0.0
+
         # Base terms always active. Optional terms gated by flags.
-        # All terms are computed and logged regardless so we can monitor
-        # what a disabled term would have contributed before enabling it.
-        total = r_vel + r_ang_vel + r_alive
+        total = r_vel + r_ang_vel + r_alive + r_standstill
         if self.use_torque:      total += r_torque
         if self.use_action_rate: total += r_action_rate
         if self.use_orientation: total += r_orientation
@@ -556,6 +671,11 @@ class UnitreeMujocoGymEnv(gym.Env):
         if self.use_lat_yaw:     total += r_lat_yaw
         if self.use_z_vel:       total += r_z_vel
         if self.use_ang_vel_xy:  total += r_ang_vel_xy
+        if self.use_feet_air_time: total += r_feet_air_time
+        if self.use_foot_slip:      total += r_foot_slip
+        if self.use_foot_clearance: total += r_foot_clearance
+        if self.use_pitch_rate:     total += r_pitch_rate
+        if self.use_flat_orientation: total += r_flat_orientation
 
         terms = {
             "reward/forward_vel":   r_vel,
@@ -568,6 +688,12 @@ class UnitreeMujocoGymEnv(gym.Env):
             "reward/lat_yaw":       r_lat_yaw,
             "reward/z_vel":         r_z_vel,
             "reward/ang_vel_xy":    r_ang_vel_xy,
+            "reward/feet_air_time": r_feet_air_time,
+            "reward/foot_slip":     r_foot_slip,
+            "reward/foot_clearance": r_foot_clearance,
+            "reward/pitch_rate":    r_pitch_rate,
+            "reward/flat_orient":   r_flat_orientation,
+            "reward/standstill":    r_standstill,
             "reward/total":         total,
             "diag/vx":              vx,
             "diag/yaw_rate":        yaw_rate,
@@ -576,6 +702,7 @@ class UnitreeMujocoGymEnv(gym.Env):
             "diag/pitch":           pitch,
             "diag/vy":              vy,
             "diag/vz":              vz,
+            "diag/n_foot_contacts": n_foot_contacts,
         }
         return total, terms
 
@@ -592,12 +719,15 @@ class UnitreeMujocoGymEnv(gym.Env):
 
         # qpos layout for a free-body robot:
         #   [tx, ty, tz, qw, qx, qy, qz, j0 … j11]
-        self.mj_data.qpos[7:] = INIT_JOINT_ANGLES
+        self.mj_data.qpos[7:] = INIT_JOINT_ANGLES + np.random.uniform(-0.05, 0.05, NUM_MOTORS)
         self.mj_data.qvel[:]  = 0.0
+        self.mj_data.qvel[:3] = np.random.uniform(-0.1, 0.1, 3)
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
         self._last_action = INIT_JOINT_ANGLES.copy()
         self._step_count  = 0
+        self._feet_air_time[:] = 0.0
+        self._feet_contact_last[:] = False
 
         self._reset_buffers()
 
@@ -606,7 +736,8 @@ class UnitreeMujocoGymEnv(gym.Env):
         fallen  = self._is_fallen()
         timeout = self._step_count >= self.max_episode_steps
         info = {"fallen": fallen, "timeout": timeout}
-        return self._build_observation(), info
+        obs = self._build_observation()
+        return obs, info
 
     def step(self, action: np.ndarray):
         action = np.clip(action, ACTION_LB, ACTION_UB).astype(np.float32)
@@ -617,7 +748,8 @@ class UnitreeMujocoGymEnv(gym.Env):
         self._imu_hist.append(self._get_imu_obs())
         self._joint_hist.append(self._get_joint_obs())
         self._action_hist.append(action.copy())
-        self._depth_buf.append(self._get_depth_frame())
+        if self.get_image:
+            self._depth_buf.append(self._get_depth_frame())
 
         self._last_action  = action.copy()
         self._step_count  += 1

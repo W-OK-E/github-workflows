@@ -20,22 +20,11 @@ from gymnasium.wrappers import TimeLimit
 
 def build_unitree_mujoco_env(
     scene_path: str,
-    get_image: bool = True,   # accepted for config compatibility; env always has depth
+    get_image: bool = True,
     **kwargs,
 ):
-    """Factory for :class:`UnitreeMujocoGymEnv`.
-
-    All keyword arguments beyond *scene_path* are forwarded to the
-    environment constructor (``Kp``, ``Kd``, ``num_action_repeat``,
-    ``sim_dt``, ``target_vel``, ``alive_reward``, ``fall_reward``,
-    ``max_episode_steps``, ``depth_norm``, ``enable_rendering``).
-
-    ``get_image`` is accepted so that training configs can include the key
-    (needed by ``NormObsWithImg`` wrapper detection) without causing an
-    unexpected-keyword-argument error.
-    """
     from envs.mujoco_env import UnitreeMujocoGymEnv
-    return UnitreeMujocoGymEnv(scene_path=scene_path, **kwargs)
+    return UnitreeMujocoGymEnv(scene_path=scene_path, get_image=get_image, **kwargs)
 
 
 ENV_DICT = {
@@ -56,6 +45,7 @@ class NormObsWithImg(gym.ObservationWrapper, BaseWrapper):
 
     def __init__(self, env, epsilon=1e-4, clipob=10.0):
         super().__init__(env)
+        self.training = True
         self.clipob = clipob
         self.state_shape = 84
         self._obs_normalizer = Normalizer((self.state_shape,))
@@ -105,10 +95,7 @@ def get_single_env(env_id, env_param):
 def get_env(env_id, env_param):
     env = get_single_env(env_id, env_param)
     if env_param.get("obs_norm"):
-        if "get_image" in env_param.get("env_build", {}):
-            env = NormObsWithImg(env)
-        else:
-            env = NormObs(env)
+        env = NormObsWithImg(env)
     return env
 
 
@@ -125,10 +112,7 @@ def get_vec_env(env_id, env_param, vec_env_nums):
         ref = env_param
 
     if ref.get("obs_norm"):
-        if "get_image" in ref.get("env_build", {}):
-            vec_env = NormObsWithImg(vec_env)
-        else:
-            vec_env = NormObs(vec_env)
+        vec_env = NormObsWithImg(vec_env)
     return vec_env
 
 
@@ -149,8 +133,5 @@ def get_subprocvec_env(env_id, env_param, vec_env_nums, proc_nums):
         ref = env_param
 
     if ref.get("obs_norm"):
-        if "get_image" in ref.get("env_build", {}):
-            vec_env = NormObsWithImg(vec_env)
-        else:
-            vec_env = NormObs(vec_env)
+        vec_env = NormObsWithImg(vec_env)
     return vec_env

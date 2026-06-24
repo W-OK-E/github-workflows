@@ -507,3 +507,45 @@ class GaussianContPolicyLocoAttnResTransformer(
     std = torch.exp(logstd)
     std = std.unsqueeze(0).expand_as(mean)
     return mean, std, logstd
+
+
+class ResidualPolicy(nn.Module, GaussianContPolicyBase):
+  """Frozen base policy + trainable residual MLP correction."""
+  def __init__(self, base_policy, state_dim, action_dim,
+               hidden_dims=(128, 64), residual_scale=0.1,
+               tanh_action=False, log_init=0.125):
+    super().__init__()
+    self.continuous = True
+    self.tanh_action = tanh_action
+
+    self.base_policy = base_policy
+    for p in self.base_policy.parameters():
+      p.requires_grad = False
+
+    layers = []
+    in_dim = state_dim
+    for h in hidden_dims:
+      layers.extend([nn.Linear(in_dim, h), nn.ReLU()])
+      in_dim = h
+    layers.append(nn.Linear(in_dim, action_dim))
+    nn.init.zeros_(layers[-1].weight)
+    nn.init.zeros_(layers[-1].bias)
+    self.residual_mlp = nn.Sequential(*layers)
+
+    self.residual_scale = residual_scale
+    self.state_dim = state_dim
+    self.logstd = nn.Parameter(torch.ones(action_dim) * np.log(log_init))
+
+  def forward(self, x):
+    with torch.no_grad():
+      base_mean = self.base_policy(x)
+      if isinstance(base_mean, tuple):
+        base_mean = base_mean[0]
+
+    state = x[..., :self.state_dim]
+    residual = self.residual_mlp(state) * self.residual_scale
+    mean = base_mean + residual
+
+    logstd = torch.clamp(self.logstd, LOG_SIG_MIN, LOG_SIG_MAX)
+    std = torch.exp(logstd).unsqueeze(0).expand_as(mean)
+    return mean, std, logstd
