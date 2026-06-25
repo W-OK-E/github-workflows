@@ -3,13 +3,13 @@ UnitreeMujocoGymEnv — gym environment for the Unitree Go2 quadruped
 using MuJoCo 3.x as the physics backend.
 
 Observation format (flat, matches LocoTransformerEncoder convention):
-  [state (84-dim) | depth_frames_flat (16384-dim)]
+  [state (86-dim) | depth_frames_flat (16384-dim)]
 
   State layout (84-dim):
     [0 : 12]  — IMU history   : [roll, pitch, gyro_x, gyro_y] × 3 steps
     [12 : 48] — Joint angles  : 12 joints × 3 steps
     [48 : 84] — Last actions  : 12 joints × 3 steps
-
+    [84 : 86] — Gait Phase
   Depth (16384-dim):
     4 stacked 64×64 single-channel depth frames, clipped to [0.3, 10] m,
     log-transformed via sqrt(log(d + 1)), then optionally z-scored.
@@ -23,6 +23,7 @@ around the Go2 home posture.  Wrapped by ``NormAct`` in the training
 pipeline, so the policy sees a [-1, 1] action space.
 """
 
+from cmath import phase
 import os
 import math
 import collections
@@ -53,9 +54,9 @@ except Exception as e:
 
 from mujoco import viewer
 
-
+GAIT_PHASE_DIM = 2
 NUM_MOTORS   = 12
-STATE_DIM    = 84           # 12 (IMU×3hist) + 36 (joints×3hist) + 36 (action×3hist)
+STATE_DIM    = 86           # 12 (IMU×3hist) + 36 (joints×3hist) + 36 (action×3hist) + 2 (gait phase)
 NUM_HIST     = 3            # proprioceptive history length
 
 IMU_DIM      = 4            # [roll, pitch, gyro_x, gyro_y]
@@ -258,6 +259,14 @@ class UnitreeMujocoGymEnv(gym.Env):
         foot_clearance_target: float = 0.04,
         pitch_rate_weight: float = 0.0,
         flat_orientation_weight: float = 0.0,
+        # -- gait phase helpers---
+        gait_period: float = 0.8,
+        # --- gait reward ---
+        feet_gait_weight: float = 0.0,
+        feet_gait_period: float = 0.8,
+        feet_gait_offset=None,
+        feet_gait_threshold: float = 0.5,
+        use_feet_gait: bool = False,
         # --- per-term enable flags (False = computed but not added to total) ---
         use_torque: bool = False,
         use_action_rate: bool = False,
@@ -287,6 +296,8 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.max_episode_steps   = max_episode_steps
         self.depth_norm          = depth_norm
         self.enable_rendering    = enable_rendering
+        # gait phase 
+        self.gait_period         = gait_period
         # base tracking
         self.vel_tracking_weight = vel_tracking_weight
         self.vel_sigma           = vel_sigma
@@ -321,7 +332,16 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.use_foot_clearance  = use_foot_clearance
         self.use_pitch_rate      = use_pitch_rate
         self.use_flat_orientation = use_flat_orientation
-
+        # feet gait reward
+        self.feet_gait_weight = feet_gait_weight
+        self.feet_gait_period = feet_gait_period
+        self.feet_gait_threshold = feet_gait_threshold
+        self.use_feet_gait = use_feet_gait
+        self.feet_gait_offset = (  # --> default for Trot Gait
+            [0.0, 0.5, 0.5, 0.0]
+            if feet_gait_offset is None
+            else feet_gait_offset
+        )
         # ------------------------------------------------------------------
         # Build MuJoCo model with the patched go2.xml (camera + abs meshdir)
         # ------------------------------------------------------------------
@@ -478,6 +498,19 @@ class UnitreeMujocoGymEnv(gym.Env):
             for _ in range(NUM_DEPTH_FRAMES):
                 self._depth_buf.append(depth0.copy())
 
+    def _get_gait_phase_obs(self) -> np.ndarray:
+        """
+        Return 2-dim gait phase observation: [sin(phase), cos(phase)].
+        Phase is computed from the current simulation time and the
+        user-specified gait period (seconds).
+        """
+        elapsed_time = self._step_count * self.num_action_repeat * self.sim_dt
+        global_phase = (elapsed_time % self.gait_period) / self.gait_period
+        phase = np.array([math.sin(2 * math.pi * global_phase),
+                         math.cos(2 * math.pi * global_phase)],
+                        dtype=np.float32)
+        return phase
+
     def _build_observation(self) -> np.ndarray:
         """
         Concatenate history buffers into the flat observation vector.
@@ -487,7 +520,8 @@ class UnitreeMujocoGymEnv(gym.Env):
         imu_hist   = np.concatenate(list(self._imu_hist),    axis=0)
         joint_hist = np.concatenate(list(self._joint_hist),  axis=0)
         act_hist   = np.concatenate(list(self._action_hist), axis=0)
-        state = np.concatenate([imu_hist, joint_hist, act_hist])
+        gait_phase = self._get_gait_phase_obs()
+        state = np.concatenate([imu_hist, joint_hist, act_hist, gait_phase])
 
         if not self.get_image:
             return state.astype(np.float32)
@@ -549,6 +583,36 @@ class UnitreeMujocoGymEnv(gym.Env):
         self._feet_air_time[contacts] = 0.0
         self._feet_contact_last = contacts.copy()
         return reward
+
+    def _compute_feet_gait_reward(self) -> float:
+        """
+        Reward agreement between expected stance phase
+        and actual foot contact.
+        """
+
+        contacts = self._get_foot_contacts()
+        elapsed_time = (self._step_count * self.num_action_repeat * self.sim_dt)
+
+        global_phase = ((elapsed_time % self.feet_gait_period) / self.feet_gait_period)
+        reward = 0.0
+
+        for i, offset in enumerate(self.feet_gait_offset):
+            leg_phase = (global_phase + offset) % 1.0
+
+            stance_prob = 1.0 if leg_phase < self.feet_gait_threshold else 0.0
+            contact = float(contacts[i])
+            reward += 1.0 - abs(stance_prob - contact)
+
+        reward /= 4.0
+        cmd_norm = np.sqrt(
+            self.target_vel**2 +
+            self.target_angular_vel**2
+        )
+        if cmd_norm < 0.1:
+            reward *= 0.2
+
+        return self.feet_gait_weight * reward
+
 
     def _compute_reward(self):
         """
@@ -662,6 +726,11 @@ class UnitreeMujocoGymEnv(gym.Env):
         # --- standstill penalty: smooth ramp, zero at target_vel ---
         r_standstill = -0.5 * np.clip(1.0 - vx / self.target_vel, 0.0, 1.0) if self.target_vel > 0.0 else 0.0
 
+        # --- optional feet gait reward ---
+        r_feet_gait = 0.0
+        if self.use_feet_gait:
+            r_feet_gait = self._compute_feet_gait_reward()
+
         # Base terms always active. Optional terms gated by flags.
         total = r_vel + r_ang_vel + r_alive + r_standstill
         if self.use_torque:      total += r_torque
@@ -676,6 +745,7 @@ class UnitreeMujocoGymEnv(gym.Env):
         if self.use_foot_clearance: total += r_foot_clearance
         if self.use_pitch_rate:     total += r_pitch_rate
         if self.use_flat_orientation: total += r_flat_orientation
+        if self.use_feet_gait: total += r_feet_gait
 
         terms = {
             "reward/forward_vel":   r_vel,
@@ -694,6 +764,7 @@ class UnitreeMujocoGymEnv(gym.Env):
             "reward/pitch_rate":    r_pitch_rate,
             "reward/flat_orient":   r_flat_orientation,
             "reward/standstill":    r_standstill,
+            "reward/feet_gait":     r_feet_gait,
             "reward/total":         total,
             "diag/vx":              vx,
             "diag/yaw_rate":        yaw_rate,

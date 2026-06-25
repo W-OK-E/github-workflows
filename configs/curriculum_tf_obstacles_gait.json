@@ -48,7 +48,8 @@
       "use_foot_slip": true,
       "use_foot_clearance": true,
       "use_pitch_rate": true,
-      "use_flat_orientation": true
+      "use_flat_orientation": true,
+      "use_feet_gait": true
     }
   },
   "replay_buffer": {
