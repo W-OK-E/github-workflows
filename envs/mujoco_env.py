@@ -280,6 +280,7 @@ class UnitreeMujocoGymEnv(gym.Env):
         use_flat_orientation: bool = False,
         use_gait_phase: bool = False,
         use_symmetry: bool = False,
+        use_feet_gait: bool = False,
     ):
         super().__init__()
 
@@ -297,7 +298,7 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.depth_norm          = depth_norm
         self.enable_rendering    = enable_rendering
         # gait phase 
-        self.gait_period         = gait_period
+        self.gait_period         = 1.0/gait_freq
         # base tracking
         self.vel_tracking_weight = vel_tracking_weight
         self.vel_sigma           = vel_sigma
@@ -337,6 +338,7 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.gait_phase_weight   = gait_phase_weight
         self.symmetry_weight     = symmetry_weight
         self.use_gait_phase      = use_gait_phase
+        self.use_feet_gait       = use_feet_gait
         self.use_symmetry        = use_symmetry
         self._gait_phase_offsets = np.array([0.0, 0.5, 0.5, 0.0])
         self._gait_clock         = 0.0
@@ -592,13 +594,13 @@ class UnitreeMujocoGymEnv(gym.Env):
         contacts = self._get_foot_contacts()
         elapsed_time = (self._step_count * self.num_action_repeat * self.sim_dt)
 
-        global_phase = ((elapsed_time % self.feet_gait_period) / self.feet_gait_period)
+        global_phase = ((elapsed_time % self.gait_period) / self.gait_period)
         reward = 0.0
 
-        for i, offset in enumerate(self.feet_gait_offset):
+        for i, offset in enumerate(self._gait_phase_offsets):
             leg_phase = (global_phase + offset) % 1.0
 
-            stance_prob = 1.0 if leg_phase < self.feet_gait_threshold else 0.0
+            stance_prob = 1.0 if leg_phase < self.gait_duty_factor else 0.0
             contact = float(contacts[i])
             reward += 1.0 - abs(stance_prob - contact)
 
@@ -610,7 +612,7 @@ class UnitreeMujocoGymEnv(gym.Env):
         if cmd_norm < 0.1:
             reward *= 0.2
 
-        return self.feet_gait_weight * reward
+        return self.gait_phase_weight * reward
 
 
     def _compute_reward(self):

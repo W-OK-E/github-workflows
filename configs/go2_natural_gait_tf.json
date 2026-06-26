@@ -54,7 +54,8 @@
       "use_pitch_rate": true,
       "use_flat_orientation": true,
       "use_gait_phase": true,
-      "use_symmetry": true
+      "use_symmetry": true,
+      "use_feet_gait": true
     }
   },
   "replay_buffer": {
@@ -63,13 +64,28 @@
   },
   "policy": {},
   "encoder": {
-    "hidden_shapes": [256, 256],
+    "hidden_shapes": [
+      256,
+      256
+    ],
     "token_dim": 64,
     "two_by_two": false
   },
   "net": {
-    "transformer_params": [[4, 128], [4, 128]],
-    "append_hidden_shapes": [256, 256],
+    "transformer_params": [
+      [
+        4,
+        128
+      ],
+      [
+        4,
+        128
+      ]
+    ],
+    "append_hidden_shapes": [
+      256,
+      256
+    ],
     "attn_res_heads": 4,
     "token_norm": true,
     "max_pool": false
