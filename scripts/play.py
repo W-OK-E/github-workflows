@@ -66,7 +66,8 @@ def get_play_args():
                         help="CUDA device index")
     parser.add_argument("--render", action="store_true", default=False,
                         help="Enable MuJoCo viewer rendering (requires a display)")
-
+    parser.add_argument("--use_mlp", action="store_true", default=False,
+                        help="Use MLP policy")
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     return args
@@ -159,32 +160,65 @@ def play(args):
     # ------------------------------------------------------------------
     params["net"]["base_type"] = networks.MLPBase
 
-    encoder = networks.LocoTransformerEncoder(
-        in_channels=4,
-        state_input_dim=env.unwrapped.state_dim,
-        **params["encoder"],
-    )
+    _use_mlp = args.use_mlp
 
-    _use_attn_res = "attn_res_heads" in params.get("net", {})
-
-    if _use_attn_res:
-        pf = policies.GaussianContPolicyLocoAttnResTransformer(
-            encoder=encoder,
-            state_input_shape=env.unwrapped.state_dim,
-            visual_input_shape=(4, 64, 64),
+    if _use_mlp:
+        # Simple MLP policy — no encoder, no transformer, state-only
+        obs_dim = env.unwrapped.observation_space.shape[0]
+        pf = policies.GaussianContPolicyBasicBias(
+            input_shape=obs_dim,
             output_shape=env.action_space.shape[0],
             **params["net"],
             **params["policy"],
+        )
+        vf = networks.Net(
+            input_shape=obs_dim,
+            output_shape=1,
+            **params["net"],
         )
     else:
-        pf = policies.GaussianContPolicyLocoTransformer(
-            encoder=encoder,
-            state_input_shape=env.unwrapped.state_dim,
-            visual_input_shape=(4, 64, 64),
-            output_shape=env.action_space.shape[0],
-            **params["net"],
-            **params["policy"],
+        encoder = networks.LocoTransformerEncoder(
+            in_channels=4,
+            state_input_dim=env.unwrapped.state_dim,
+            **params["encoder"],
         )
+        encoder_vf = copy.deepcopy(encoder)
+
+        _use_attn_res = "attn_res_heads" in params.get("net", {})
+
+        if _use_attn_res:
+            pf = policies.GaussianContPolicyLocoAttnResTransformer(
+                encoder=encoder,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=env.action_space.shape[0],
+                **params["net"],
+                **params["policy"],
+            )
+            vf = networks.LocoAttnResTransformer(
+                encoder=encoder_vf,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=1,
+                **params["net"],
+            )
+        else:
+            pf = policies.GaussianContPolicyLocoTransformer(
+                encoder=encoder,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=env.action_space.shape[0],
+                **params["net"],
+                **params["policy"],
+            )
+            vf = networks.LocoTransformer(
+                encoder=encoder,
+                state_input_shape=env.unwrapped.state_dim,
+                visual_input_shape=(4, 64, 64),
+                output_shape=1,
+                **params["net"],
+            )
+
 
     pf.load_state_dict(torch.load(pf_path, map_location=device))
     pf.to(device)

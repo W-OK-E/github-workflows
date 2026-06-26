@@ -259,14 +259,12 @@ class UnitreeMujocoGymEnv(gym.Env):
         foot_clearance_target: float = 0.04,
         pitch_rate_weight: float = 0.0,
         flat_orientation_weight: float = 0.0,
-        # -- gait phase helpers---
-        gait_period: float = 0.8,
-        # --- gait reward ---
-        feet_gait_weight: float = 0.0,
-        feet_gait_period: float = 0.8,
-        feet_gait_offset=None,
-        feet_gait_threshold: float = 0.5,
-        use_feet_gait: bool = False,
+        # --- gait phase clock ---
+        gait_freq: float = 2.0,
+        gait_duty_factor: float = 0.5,
+        gait_phase_weight: float = 0.0,
+        # --- action symmetry ---
+        symmetry_weight: float = 0.0,
         # --- per-term enable flags (False = computed but not added to total) ---
         use_torque: bool = False,
         use_action_rate: bool = False,
@@ -280,6 +278,8 @@ class UnitreeMujocoGymEnv(gym.Env):
         use_foot_clearance: bool = False,
         use_pitch_rate: bool = False,
         use_flat_orientation: bool = False,
+        use_gait_phase: bool = False,
+        use_symmetry: bool = False,
     ):
         super().__init__()
 
@@ -332,16 +332,15 @@ class UnitreeMujocoGymEnv(gym.Env):
         self.use_foot_clearance  = use_foot_clearance
         self.use_pitch_rate      = use_pitch_rate
         self.use_flat_orientation = use_flat_orientation
-        # feet gait reward
-        self.feet_gait_weight = feet_gait_weight
-        self.feet_gait_period = feet_gait_period
-        self.feet_gait_threshold = feet_gait_threshold
-        self.use_feet_gait = use_feet_gait
-        self.feet_gait_offset = (  # --> default for Trot Gait
-            [0.0, 0.5, 0.5, 0.0]
-            if feet_gait_offset is None
-            else feet_gait_offset
-        )
+        self.gait_freq           = gait_freq
+        self.gait_duty_factor    = gait_duty_factor
+        self.gait_phase_weight   = gait_phase_weight
+        self.symmetry_weight     = symmetry_weight
+        self.use_gait_phase      = use_gait_phase
+        self.use_symmetry        = use_symmetry
+        self._gait_phase_offsets = np.array([0.0, 0.5, 0.5, 0.0])
+        self._gait_clock         = 0.0
+
         # ------------------------------------------------------------------
         # Build MuJoCo model with the patched go2.xml (camera + abs meshdir)
         # ------------------------------------------------------------------
@@ -666,7 +665,7 @@ class UnitreeMujocoGymEnv(gym.Env):
         # --- optional: orientation penalty ---
         quat          = sd[SD_IMU_QUAT]
         roll, pitch, _ = _quat_wxyz_to_rpy(quat)
-        r_orientation  = -self.orientation_weight * (roll ** 2 + pitch ** 2)
+        r_orientation  = -self.orientation_weight * (roll ** 2 + 3.0 * pitch ** 2)
 
         # --- optional: body height penalty ---
         z        = float(self.mj_data.xpos[self._base_body_id, 2])
@@ -713,6 +712,30 @@ class UnitreeMujocoGymEnv(gym.Env):
                         foot_z, self.foot_clearance_target
                     )
 
+        # --- optional: gait phase clock (trot pattern) ---
+        r_gait_phase = 0.0
+        if self.use_gait_phase:
+            control_dt = self.sim_dt * self.num_action_repeat
+            self._gait_clock += self.gait_freq * control_dt
+            desired_contacts = np.array([
+                ((self._gait_clock + off) % 1.0) < self.gait_duty_factor
+                for off in self._gait_phase_offsets
+            ], dtype=np.float32)
+            # phase_error = float(np.sum((desired_contacts - contacts.astype(np.float32)) ** 2))
+            # r_gait_phase = self.gait_phase_weight * math.exp(-4.0 * phase_error)
+            phase_error = np.sum(np.abs(desired_contacts - contacts))
+            r_gait_phase = self.gait_phase_weight * (1.0 - phase_error / 4.0)
+
+        # --- optional: action symmetry (diagonal pairs should match) ---
+        r_symmetry = 0.0
+        if self.use_symmetry and len(self._action_hist) >= 1:
+            act = self._action_hist[-1]
+            fr, fl = act[0:3], act[3:6]
+            rr, rl = act[6:9], act[9:12]
+            sym_err = float(np.sum((fr - rl) ** 2) + np.sum((fl - rr) ** 2))
+            # r_symmetry = -self.symmetry_weight * sym_err
+            r_symmetry = self.symmetry_weight * np.exp(-sym_err)
+
         # --- optional: pitch rate penalty (high pitch rate → falling) ---
         r_pitch_rate = -self.pitch_rate_weight * (wy ** 2) if self.use_pitch_rate else 0.0
 
@@ -745,7 +768,8 @@ class UnitreeMujocoGymEnv(gym.Env):
         if self.use_foot_clearance: total += r_foot_clearance
         if self.use_pitch_rate:     total += r_pitch_rate
         if self.use_flat_orientation: total += r_flat_orientation
-        if self.use_feet_gait: total += r_feet_gait
+        if self.use_gait_phase:     total += r_gait_phase
+        if self.use_symmetry:       total += r_symmetry
 
         terms = {
             "reward/forward_vel":   r_vel,
@@ -763,6 +787,8 @@ class UnitreeMujocoGymEnv(gym.Env):
             "reward/foot_clearance": r_foot_clearance,
             "reward/pitch_rate":    r_pitch_rate,
             "reward/flat_orient":   r_flat_orientation,
+            "reward/gait_phase":    r_gait_phase,
+            "reward/symmetry":      r_symmetry,
             "reward/standstill":    r_standstill,
             "reward/feet_gait":     r_feet_gait,
             "reward/total":         total,
@@ -799,6 +825,7 @@ class UnitreeMujocoGymEnv(gym.Env):
         self._step_count  = 0
         self._feet_air_time[:] = 0.0
         self._feet_contact_last[:] = False
+        self._gait_clock = 0.0
 
         self._reset_buffers()
 
