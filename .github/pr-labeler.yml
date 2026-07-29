@@ -1,0 +1,58 @@
+# Config for actions/labeler — auto-labels PRs based on which files changed.
+# Docs: https://github.com/actions/labeler
+
+"algo":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "torchrl/algo/**"
+          - "torchrl/policies/**"
+          - "torchrl/networks/**"
+
+"env/robot":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "envs/**"
+          - "robot/**"
+          - "torchrl/env/**"
+
+"rewards":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "configs/reward_experiments/**"
+          - "**/*reward*"
+
+"configs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "configs/**"
+
+"scripts":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "scripts/**"
+          - "play.sh"
+          - "run.sh"
+
+"collector/replay-buffer":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "torchrl/collector/**"
+          - "torchrl/replay_buffers/**"
+
+"docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "Readme.md"
+          - "report.tex"
+
+"dependencies":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "requirements.txt"
+          - "setup.py"
+
+"ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
